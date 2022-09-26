@@ -1,0 +1,332 @@
+<html>
+<head>
+<script src="papaparse.min.js" type="text/javascript"></script>
+<script src="plotly.min.js" type="text/javascript"></script>
+<style type="text/css">
+  table { border-collapse: collapse }
+  th,td { border: 1px solid #AAF; }
+</style>
+<script type="text/javascript">
+"use strict"
+
+function parseURISearchParams(uri, x, y) {
+    x = x || function(x) {
+        x = decodeURIComponent(x && x.replace(/\+/g, ' '));
+        return (!isNaN(parseInt(x)) && !isNaN(x * 1)) ? x * 1 : x;
+    };
+    y = y || decodeURIComponent;
+
+    var o = {};
+
+    if (uri === '') {
+        return o;
+    }
+
+    function add(o, k, v) {
+        if (o.hasOwnProperty(k)) {
+            if (o[k] instanceof Array) {
+                o[k].push(v);
+            } else if (!(o[k] instanceof Object)) {
+                o[k] = [o[k], v];
+            }
+        } else {
+            o[k] = v;
+        }
+        o = o[k];
+        return o;
+    }
+
+    return uri.match(/([^=&]+)(=([^&]*))?/g).reduce(function(c, p, i, d) {
+        i = /([^=]+)(=(.*))?/.exec(p)
+        var k = y(i[1]),
+            v = i[3] || '';
+
+        if (/\[/.test(k)) {
+            k.match(/([^\[]+)|\[([^\]]+)\]/g).reduce(function(c, p, i, d) {
+                return add(c, p.replace(/[\[\]]/g, ''), (d.length - 1 === i ? x(v) : {}));
+            }, o);
+        } else {
+            add(c, k, x(v));
+        }
+        return o;
+    }, o);
+}
+
+function mylapsViewer_class(resultFile, passingsFile,rowStart,rowEnd,raceType,numLaps) {
+  this.resultFile = resultFile;
+  this.passingsFile = passingsFile;
+  this.rowStart = rowStart;
+  this.rowEnd = rowEnd;
+  this.raceType = raceType;
+  this.numLaps = numLaps;
+}
+
+mylapsViewer_class.prototype.viewResults = function(divName) {
+  Papa.parse(this.resultFile, {
+    download: true,
+    complete: (results) => {
+      let data = results.data;
+      const header = data[0];
+console.log('header',header);
+      const cols = [2,3,7,4,5,8,9];
+      const table = [];
+      let row = data[0];
+      let rowHtml = '';
+      for (let c=0; c<cols.length; c++) {
+        rowHtml += '<th>'+row[cols[c]]+'</th>';
+      }
+      /*data = data.sort( (a,b) => { 
+        const nameA = a[cols[0]];
+        const nameB = b[cols[0]];
+        if (nameA && nameB) return nameA.toUpperCase()<nameB.toUpperCase() ? -1 : 1 
+      } );*/
+      const html = [rowHtml];
+      for (let i=1; i<data.length; i++) {
+        row  = data[i];
+        rowHtml = '';
+        const name = row[cols[0]];
+        if (!name) continue;
+        //const firstName = name.split(' ')[0];
+        rowHtml += '<td>'+name+'</td>';
+        for (let c=1; c<cols.length; c++) {
+          rowHtml += '<td>'+row[cols[c]]+'</td>';
+        }
+        html.push(rowHtml);
+      }
+      document.getElementById(divName).innerHTML = '<table><tr>'+html.join('</tr><tr>')+'</tr></table>';
+    }
+  });
+}
+
+mylapsViewer_class.prototype.await_elapsedVsLaps = function() {
+  if (!this.elapsedVsLapsPromise) this.elapsedVsLapsPromise = new Promise( (resolve, reject) => {
+    Papa.parse(this.passingsFile, {
+      download: true,
+      complete: (results) => {
+        const data = results.data;
+        const header = data[0];
+        const rowStart = this.rowStart;
+        const rowEnd = this.rowEnd || data.length-1
+        const colNr = 1;
+        const colName = 2;
+        const colElapsed = 7;
+        const colPassage = 8;
+        const elapsed_vs_laps = {};
+        const firstNames = {};
+        for (let i=rowStart; i<=rowEnd; i++) {
+          const data_i = data[i];
+          if (!data_i) {
+            console.log('Empty data for index ',i);
+            continue;
+          }
+          const nr = data_i[colNr];
+          const name = data_i[colName];
+          if (name) {
+            const parts = data_i[colName].split(' ')
+            const firstName = parts[0] + (parts[1] ? parts[1][0] : '');
+            firstNames[nr] = firstName;
+          }
+          let elapsed = data_i[colElapsed];
+          if (elapsed) {
+            const parts = elapsed.split(':').reverse();            
+            elapsed = parseFloat(parts[0]);
+            if (parts.length>1) elapsed += 60*parts[1];
+            if (parts.length>2) elapsed += 3600*parts[2];
+          }
+          if (this.raceType == 'tt') {
+            if (elapsed == 0) elapsed_vs_laps[nr] = [];
+            if (elapsed_vs_laps[nr] && elapsed_vs_laps[nr].length<=this.numLaps) elapsed_vs_laps[nr].push(elapsed)
+          } else if (this.raceType == 'fastest-lap') {
+            if (!elapsed_vs_laps[nr]) elapsed_vs_laps[nr] = [];
+            elapsed_vs_laps[nr].push(elapsed)
+          } else {
+            if (!elapsed_vs_laps[nr]) elapsed_vs_laps[nr] = [];
+            elapsed_vs_laps[nr].push(elapsed)
+          }
+        }
+        resolve([elapsed_vs_laps,firstNames]);
+      }
+    });
+  });
+  return this.elapsedVsLapsPromise;
+}
+
+mylapsViewer_class.prototype.lapsVsTime = function(elapsed_vs_laps,dt) {
+console.log('elapsed_vs_laps',elapsed_vs_laps);
+  const laps_vs_time = {};
+  // for all laps...
+  for (let nr in elapsed_vs_laps) {
+    // duration of this lap
+    const elapsed = elapsed_vs_laps[nr];
+    laps_vs_time[nr] = [];
+    
+    let jStart = 0;
+    for (let i=0; i<elapsed.length-1; i++) {
+      let lapTime = (elapsed[i+1]-elapsed[i]);
+      let jEnd = Math.floor(elapsed[i+1]/dt);
+      for (let j=jStart; j<=jEnd; j++) {
+        laps_vs_time[nr][j] = (i + (j*dt-elapsed[i])/lapTime);
+      }
+      jStart = jEnd+1;
+    }
+  }
+  return laps_vs_time; 
+}
+
+mylapsViewer_class.prototype.plotLead = function(youNr,opponentNr,trackLength,divElemLead,divElemLapsAhead) {
+  this.await_elapsedVsLaps()
+  .then( ([elapsed_vs_laps,firstNames]) => {
+    const timeStep = 6;
+    const laps_vs_time = this.lapsVsTime(elapsed_vs_laps,timeStep);
+
+    const pdata2 = [];
+    const pdata3 = [];
+    
+    const refNr = opponentNr;
+    const refLaps = laps_vs_time[refNr];
+        
+    for (let nr in laps_vs_time) {
+      if (nr !== youNr) continue;
+      const laps = laps_vs_time[nr];
+      const diffPos_vs_time = {};
+      const diffLaps_vs_time = {};
+      for (let j=0; j<laps.length; j++) {
+        let diffLaps = laps[j]-refLaps[j];
+        let modDiff = (laps[j]-refLaps[j]) % 1;
+        modDiff = (modDiff < -0.5 ? modDiff + 1 : (modDiff > 0.5 ? modDiff - 1 : modDiff));
+        diffLaps -= modDiff;
+        if (modDiff < -1/4 || modDiff > 1/4) modDiff = NaN;
+        diffPos_vs_time[(j*(timeStep/60)).toFixed(2)] = modDiff*trackLength;
+        diffLaps_vs_time[(j*(timeStep/60)).toFixed(2)] = diffLaps;
+      }
+      pdata2.push({
+        x: Object.keys(diffPos_vs_time),
+        y: Object.values(diffPos_vs_time),
+        type: 'scatter',
+        name: firstNames[nr]
+      });
+      pdata3.push({
+        x: Object.keys(diffLaps_vs_time),
+        y: Object.values(diffLaps_vs_time),
+        type: 'scatter',
+        name: firstNames[nr]
+      });
+    }
+    
+    const playout2 = {
+      title: 'Position of '+firstNames[youNr]+' vs. '+firstNames[refNr],
+      xaxis: {
+        title: 'time [minutes]'
+      },
+      yaxis: {
+        title: 'lead of '+firstNames[youNr]+' vs. '+firstNames[refNr]+' [m]'
+      }
+    };
+    divElemLead.innerHTML = '';
+    Plotly.newPlot(divElemLead, pdata2, playout2);
+
+    const playout3 = {
+      title: 'Laps ahead '+firstNames[youNr]+' vs. '+firstNames[refNr],
+      xaxis: {
+        title: 'time [minutes]'
+      },
+      yaxis: {
+        title: 'laps ahead of '+firstNames[refNr]+' [-]'
+      }
+    };
+    divElemLapsAhead.innerHTML = '';
+    Plotly.newPlot(divElemLapsAhead, pdata3, playout3);
+  })
+}
+
+
+function bodyOnload() {
+  const trackLength = 2500;
+  const viewSixthree = new mylapsViewer_class('results/Groep CV2022 - Criterium 6 3 uurs race - Results.csv','results/Passings Groep CV2022 - Criterium 6 3 uurs race.csv',6,null,'race',null);
+  const divElemLead = document.getElementById('sixthreeRaceLead');
+  const divElemLapsAhead = document.getElementById('sixthreeRaceLapsAhead');
+  
+  const queryParams = parseURISearchParams(window.location.search.slice(1));
+  
+  viewSixthree.viewResults('sixthreeRaceResult');
+  
+  viewSixthree.await_elapsedVsLaps()
+  .then( ([elapsed_vs_laps,firstNames]) => {
+    const pdata = [];
+    for (let nr in elapsed_vs_laps) {
+      if (!nr) continue;
+      const elapsed = elapsed_vs_laps[nr];
+      const speed = {};
+      for (let i=1; i<elapsed.length; i++) {
+        speed[i] = ( 3.6*trackLength/(elapsed[i]-elapsed[i-1]) )
+      }
+      const time_min = {}
+      for (let i=1; i<elapsed.length; i++) {
+        time_min[i] = (elapsed[i])/60;
+      }
+      const trace = {
+        x: Object.values(time_min),
+        y: Object.values(speed),
+        type: 'scatter',
+        name: firstNames[nr]
+      }
+      pdata.push(trace);
+    }
+    
+    const playout = {
+      title: 'six/three hour race',
+      xaxis: {
+        title: 'time [minutes]',
+        fixedrange: true
+      },
+      yaxis: {
+        title: 'speed [km/h]',
+        fixedrange: true
+      }
+    };
+
+    Plotly.newPlot('sixthreeRace', pdata, playout);
+    
+    const yourselfElem = document.getElementById('sixthreeRaceRider1');
+    const opponentElem = document.getElementById('sixthreeRaceRider2');
+    yourselfElem.onchange = opponentElem.onchange = () => {
+      const yourself = yourselfElem.options[yourselfElem.selectedIndex].value;
+      const opponent = opponentElem.options[opponentElem.selectedIndex].value;
+      if (yourself && opponent) viewSixthree.plotLead(yourself,opponent,trackLength,divElemLead,divElemLapsAhead);
+    }
+    for (let nr in firstNames) {
+      const elem = document.createElement('option');
+      if (queryParams.you && firstNames[nr].toLowerCase() == queryParams.you.toLowerCase()) elem.selected = true;
+      elem.value = nr;
+      elem.appendChild(document.createTextNode(firstNames[nr]));
+      yourselfElem.appendChild(elem);
+    }
+    for (let nr in firstNames) {
+      const elem = document.createElement('option');
+      if (queryParams.opponent && firstNames[nr].toLowerCase() == queryParams.opponent.toLowerCase()) elem.selected = true;
+      elem.value = nr;
+      elem.appendChild(document.createTextNode(firstNames[nr]));
+      opponentElem.appendChild(elem);
+    }
+    yourselfElem.onchange();
+    
+  });
+}
+</script>
+</head>
+<body onload="bodyOnload()">
+<h1>Cycle Vision 2022</h1>
+<!--span>De resultaten zijn <a href="https://results.sporthive.com/events/PC1642153"></a>ook te vinden op mylaps</a>.</span-->
+<h3>Combined 6 and 3 hour race</h3>
+<div id="sixthreeRaceResult"></div>
+<br/>
+<div style="border:5px solid #DDD" id="sixthreeRace"></div>
+<br/>The plots are interactive. Double click your name to see only your curve. Then add competitors by single-clicking their name.
+<br/>
+<h3>Race details: rider comparison</h3>
+<div>Show details of <select id="sixthreeRaceRider1"><option selected disabled value="">Choose rider 1...</option></select> in relation to <select id="sixthreeRaceRider2"><option selected disabled value="">Choose rider 2...</option></select></div>
+<div style="border:5px solid #DDD" id="sixthreeRaceLead">PLOT WITH DISTANCE OF RIDER 1 VS RIDER 2 APPEARS HERE, SELECT PAIR OF RIDERS.</div>
+<div style="border:5px solid #DDD" id="sixthreeRaceLapsAhead">PLOT WITH LAPS AHEAD OF RIDER 1 VS RIDER 2 APPEARS HERE, SELECT PAIR OF RIDERS.</div>
+
+</body>
+</html>
